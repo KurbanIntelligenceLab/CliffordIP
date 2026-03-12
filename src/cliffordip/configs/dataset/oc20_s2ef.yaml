@@ -1,0 +1,26 @@
+# OC20 S2EF dataset config — FairChem-aligned losses and evaluation
+dataset:
+  name: oc20
+  data_root: data/OC20
+  task_type: s2ef
+  target_name: s2ef
+  task: s2ef
+  split_train: train
+  split_val: val_id
+  split_test: null  # OC20 test splits withhold labels; set val_ood_ads if you have it
+  energy_loss: per_atom_mae
+  force_loss: l2norm
+  energy_weight: 1.0
+  force_weight: 3.0
+  train_on_free_atoms: true
+  eval_on_free_atoms: true
+  max_train_samples: null
+  max_val_samples: null
+  max_test_samples: null
+
+training:
+  batch_size: 16
+  loss: mse  # fallback for non-S2EF branches; overridden by energy_loss/force_loss
+
+model:
+  cutoff: 6.0

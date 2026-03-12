@@ -1,0 +1,11 @@
+# GotenNet model config — data_wrapper interface
+# Target: ~1.06M params (verified)
+model:
+  name: gotennet
+  interface: data_wrapper
+  n_atom_basis: 96
+  n_interactions: 5
+  cutoff: 6.0
+  max_num_neighbors: 50
+  cutoff_fn_name: cosine   # cosine | polynomial
+  pooling: auto            # mean | add | auto (resolved from dataset.task_type)

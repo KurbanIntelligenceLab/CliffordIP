@@ -1,0 +1,10 @@
+# PaiNN model config — data_wrapper interface
+model:
+  name: painn
+  interface: data_wrapper
+  hidden_channels: 144
+  num_layers: 4
+  num_rbf: 64
+  cutoff: 6.0
+  max_neighbors: 50
+  num_elements: 100

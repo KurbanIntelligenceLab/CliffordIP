@@ -1,0 +1,21 @@
+# OC20 IS2RE dataset config — single split, energy only, L1 loss + EwT metric
+dataset:
+  name: oc20
+  data_root: data/OC20
+  task_type: is2re
+  target_name: is2re
+  task: is2re
+  split_train: train
+  split_val: val_id
+  split_test: null  # val_ood_ads not downloaded; override via dataset.split_test if needed
+  ewt_threshold: 0.02
+  max_train_samples: null
+  max_val_samples: null
+  max_test_samples: null
+
+training:
+  batch_size: 16
+  loss: l1
+
+model:
+  cutoff: 6.0

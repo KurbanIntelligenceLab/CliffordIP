@@ -1,0 +1,17 @@
+# QM9 dataset config — small molecule property regression
+dataset:
+  name: qm9
+  data_root: data/QM9
+  task_type: scalar
+  target_idx: 7       # U0 atomization energy at 0K (eV); range 0–18
+  n_train: 110000
+  n_val: 10000
+  n_test: 10831       # remaining samples (~130831 total)
+
+training:
+  batch_size: 32
+  loss: mse
+
+model:
+  cutoff: 5.0
+  interface: data_wrapper

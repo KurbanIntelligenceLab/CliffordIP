@@ -1,0 +1,25 @@
+# OC22 S2EF-Total dataset config — oxide electrocatalysis, energy + forces
+# https://fair-chem.github.io/catalysts/datasets/oc22.html
+dataset:
+  name: oc22
+  data_root: data/OC22
+  task_type: s2ef
+  target_name: s2ef
+  task: s2ef
+  split_train: train
+  split_val: val_id
+  energy_loss: per_atom_mae
+  force_loss: l2norm
+  energy_weight: 1.0
+  force_weight: 3.0
+  train_on_free_atoms: true
+  eval_on_free_atoms: true
+  max_train_samples: null
+  max_val_samples: null
+
+training:
+  batch_size: 16
+  loss: mse  # fallback for non-S2EF branches; overridden by energy_loss/force_loss
+
+model:
+  cutoff: 6.0

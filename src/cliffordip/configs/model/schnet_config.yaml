@@ -1,0 +1,10 @@
+# SchNet model config — PyG-native interface
+# Target: ~985K params (verified)
+model:
+  name: schnet
+  interface: pyg_native
+  hidden_channels: 192
+  num_filters: 192
+  num_interactions: 6
+  num_gaussians: 50
+  cutoff: 6.0

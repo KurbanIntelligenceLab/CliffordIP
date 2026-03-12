@@ -1,0 +1,22 @@
+# TorchMD-Net model config — data_wrapper interface
+
+model:
+  name: torchmdnet
+  interface: data_wrapper
+  model_arch: equivariant-transformer
+  embedding_dimension: 104
+  num_layers: 6
+  num_rbf: 56
+  rbf_type: expnorm
+  trainable_rbf: false
+  activation: silu
+  cutoff_lower: 0.0
+  cutoff_upper: 6.0
+  max_z: 100
+  max_num_neighbors: 50
+  num_heads: 8
+  distance_influence: both
+  neighbor_embedding: true
+  attn_activation: silu
+  output_model: Scalar
+  reduce_op: add

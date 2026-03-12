@@ -1,0 +1,18 @@
+# MD17 dataset config — molecular dynamics energy + force prediction
+dataset:
+  name: md17
+  data_root: data/MD17
+  task_type: energy_forces
+  molecule: aspirin     # aspirin | ethanol | malonaldehyde | naphthalene | toluene | uracil | ...
+  n_train: 950          # standard small-data benchmark split
+  n_val: 50
+  energy_weight: 1.0
+  force_weight: 100.0   # forces weighted higher — standard for MD17
+
+training:
+  batch_size: 8
+  loss: mse
+
+model:
+  cutoff: 5.0
+  interface: data_wrapper

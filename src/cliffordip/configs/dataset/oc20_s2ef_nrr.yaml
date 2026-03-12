@@ -1,0 +1,27 @@
+# OC20 S2EF NRR — Nitrogen reduction subset (*N, *NH, *NO, *N2, etc.)
+# Tier 3: Focused catalysis analysis for NRR selectivity
+dataset:
+  name: oc20
+  data_root: data/OC20
+  task_type: s2ef
+  target_name: s2ef
+  task: s2ef
+  split_train: train
+  split_val: val_id
+  split_test: null  # Set test_id to enable: download s2ef_test_lmdbs.tar.gz (30GB) from OCP, extract to data/OC20/s2ef/all/
+  energy_loss: per_atom_mae
+  force_loss: l2norm
+  energy_weight: 1.0
+  force_weight: 3.0
+  train_on_free_atoms: true
+  eval_on_free_atoms: true
+  max_train_samples: null
+  max_val_samples: null
+  max_test_samples: null
+
+training:
+  batch_size: 32
+  loss: mse  # fallback for non-S2EF branches; overridden by energy_loss/force_loss
+
+model:
+  cutoff: 6.0

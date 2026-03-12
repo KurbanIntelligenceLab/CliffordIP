@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cliffordip"
+version = "0.1.0"
+description = "Equivariant GNN for MLIPs built on Clifford algebra Cl(3,0)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["machine-learning", "interatomic-potentials", "clifford-algebra", "equivariant-gnn", "mlip"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "torch>=2.1",
+    "torch-geometric>=2.4",
+    "torch-scatter>=2.1",
+    "omegaconf>=2.3",
+    "lightning>=2.2",
+    "jsonargparse[signatures]>=4.27.7",
+    "tqdm>=4.65",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+oc20      = ["lmdb>=1.4"]
+oc22      = ["lmdb>=1.4"]
+md17      = ["ase>=3.22", "torch-cluster>=1.6"]
+qm9       = ["ase>=3.22"]
+log       = ["wandb>=0.16"]
+baselines = ["torch-cluster>=1.6", "e3nn>=0.5"]
+dev = [
+    "pytest>=7.4",
+    "mypy>=1.8",
+    "ruff>=0.3",
+    "cliffordip[oc20,oc22,log,baselines]",
+]
+
+[project.scripts]
+cliffordip-train = "cliffordip.lightning.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cliffordip"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "npj_template/",
+    "results/",
+    "analyze_scripts/",
+    ".DS_Store",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true

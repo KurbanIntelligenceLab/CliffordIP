@@ -35,7 +35,7 @@ Config & registry:
     from cliffordip.train.dataset_registry import register_dataset, build_dataloaders
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Core Clifford algebra — zero heavy dependencies at import time
 from cliffordip.cliffordip import (

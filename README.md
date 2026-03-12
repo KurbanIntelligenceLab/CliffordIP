@@ -1,4 +1,4 @@
-# CliffordIP: Geometric Algebra Equivariant Graph Neural Network Potentials for Computational Catalysis
+# CliffordIP: Clifford Algebra Equivariant Interatomic Potentials for Heterogeneous Catalysis
 
 Equivariant GNN for machine learning interatomic potentials (MLIPs) built on Clifford algebra Cl(3,0). Targets OC20, OC22, QM9, MD17, and any custom dataset via a plugin registry.
 

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cliffordip"
-version = "0.1.0"
-description = "Equivariant GNN for MLIPs built on Clifford algebra Cl(3,0)"
+version = "0.1.1"
+description = "CliffordIP: Clifford Algebra Equivariant Interatomic Potentials for Heterogeneous Catalysis"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

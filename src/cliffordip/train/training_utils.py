@@ -171,8 +171,45 @@ def load_checkpoint(path: str, model, optimizer=None, scheduler=None,
         if present in the checkpoint, else None.
         Also returns the epoch number.
     """
+    import warnings
     ckpt = torch.load(path, map_location=device or "cpu", weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
+    sd = ckpt["model_state_dict"]
+    sd, grade_migrated = _migrate_per_grade_linear(sd)
+    sd, l2_migrated = _migrate_l2_edge_embed(sd)
+
+    # Drop checkpoint keys not present in the model (e.g. higher-grade weights
+    # from layers that now use a narrower progressive grade schedule).
+    model_keys = set(model.state_dict().keys())
+    extra = [k for k in sd if k not in model_keys]
+    missing = [k for k in model_keys if k not in sd]
+    if extra:
+        for k in extra:
+            del sd[k]
+    if grade_migrated:
+        warnings.warn(
+            f"Checkpoint {path!r} uses the legacy CliffordIPLinear format "
+            "(single weight[8,C,C]). Auto-migrated to per-grade w0/w1/w2/w3.",
+            UserWarning, stacklevel=2,
+        )
+    if l2_migrated:
+        warnings.warn(
+            f"Checkpoint {path!r}: edge embedding weights truncated from "
+            "[C, n_rbf+5] to [C, n_rbf] (legacy use_l2=True format).",
+            UserWarning, stacklevel=2,
+        )
+    if extra:
+        warnings.warn(
+            f"Checkpoint {path!r}: dropped {len(extra)} keys not present in the "
+            f"current model (grade-schedule narrowing). Dropped: {extra[:5]}{'...' if len(extra) > 5 else ''}",
+            UserWarning, stacklevel=2,
+        )
+    if missing:
+        warnings.warn(
+            f"Checkpoint {path!r}: {len(missing)} model keys have no matching "
+            f"checkpoint weight and will use random init: {missing[:5]}{'...' if len(missing) > 5 else ''}",
+            UserWarning, stacklevel=2,
+        )
+    model.load_state_dict(sd, strict=not bool(missing))
     if optimizer is not None and "optimizer_state_dict" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     if scheduler is not None and "scheduler_state_dict" in ckpt:
@@ -186,21 +223,70 @@ def load_checkpoint(path: str, model, optimizer=None, scheduler=None,
     return epoch, training_state
 
 
+def _migrate_per_grade_linear(sd: dict) -> tuple[dict, bool]:
+    """Convert legacy CliffordIPLinear ``weight`` tensors to per-grade format.
+
+    Legacy: single ``weight`` of shape ``[8, C_out, C_in]`` + ``grade_mask`` buffer.
+    Current: four tensors ``w0, w1, w2, w3`` each of shape ``[C_out, C_in]``.
+
+    Returns the (possibly modified) state dict and a bool indicating whether
+    any migration was applied.
+    """
+    new_sd: dict = {}
+    migrated = False
+    for key, val in sd.items():
+        if key.endswith(".weight") and val.dim() == 3 and val.shape[0] == 8:
+            prefix = key[: -len(".weight")]
+            new_sd[f"{prefix}.w0"] = val[0]
+            new_sd[f"{prefix}.w1"] = val[1:4].mean(0)
+            new_sd[f"{prefix}.w2"] = val[4:7].mean(0)
+            new_sd[f"{prefix}.w3"] = val[7]
+            migrated = True
+        elif key.endswith(".grade_mask"):
+            pass  # buffer removed in new model
+        else:
+            new_sd[key] = val
+    return new_sd, migrated
+
+
+def _migrate_l2_edge_embed(sd: dict) -> tuple[dict, bool]:
+    """Truncate legacy edge embedding weights from shape [C, n_rbf+5] to [C, n_rbf].
+
+    Early checkpoints were saved with ``use_l2=True``, which appended 5 extra
+    columns to the first linear layer of ``scalar_net`` and ``vector_net``.
+    The current architecture uses only the n_rbf columns.
+
+    Returns the (possibly modified) state dict and a bool indicating whether
+    any migration was applied.
+    """
+    # Detect the RBF size from the stored offsets buffer
+    rbf_key = next((k for k in sd if k.endswith("edge_embed.rbf.offsets")), None)
+    if rbf_key is None:
+        return sd, False
+
+    n_rbf = sd[rbf_key].shape[0]
+    migrated = False
+    for net in ("scalar_net", "vector_net"):
+        w_key = rbf_key.replace("edge_embed.rbf.offsets", f"edge_embed.{net}.0.weight")
+        if w_key in sd and sd[w_key].shape[1] == n_rbf + 5:
+            sd[w_key] = sd[w_key][:, :n_rbf].contiguous()
+            migrated = True
+    return sd, migrated
+
+
 def migrate_checkpoint(old_path: str, new_path: str | None = None) -> dict:
-    """Convert a legacy CliffordIPLinear checkpoint to the current per-grade format.
+    """Convert legacy checkpoint formats to the current format.
 
-    Legacy format: a single ``weight`` tensor of shape ``[8, C_out, C_in]``.
+    Handles two migrations (applied in order, both idempotent):
 
-    Current format: four tensors ``w0, w1, w2, w3`` each of shape ``[C_out, C_in]``,
-    one weight per grade.
+    1. **Per-grade CliffordIPLinear weights** — legacy single ``weight`` tensor
+       of shape ``[8, C_out, C_in]`` → four tensors ``w0, w1, w2, w3`` each
+       of shape ``[C_out, C_in]``.  Stale ``grade_mask`` buffers are dropped.
 
-    Mapping:
-        w0 = weight[0]            (grade-0 scalar, 1 component)
-        w1 = mean(weight[1:4])    (grade-1 vector, avg of e1/e2/e3)
-        w2 = mean(weight[4:7])    (grade-2 bivector, avg of e12/e13/e23)
-        w3 = weight[7]            (grade-3 pseudoscalar, 1 component)
-
-    Stale ``grade_mask`` buffer keys are dropped (no longer part of the model).
+    2. **L=2 edge embedding columns** — early checkpoints have
+       ``edge_embed.scalar_net.0.weight`` / ``vector_net.0.weight`` with
+       shape ``[C, n_rbf+5]``.  The last 5 columns are stripped to give
+       ``[C, n_rbf]``.
 
     Parameters
     ----------
@@ -215,20 +301,10 @@ def migrate_checkpoint(old_path: str, new_path: str | None = None) -> dict:
         The converted checkpoint (same structure, updated model_state_dict).
     """
     ckpt = torch.load(old_path, map_location="cpu", weights_only=False)
-    old_sd = ckpt["model_state_dict"]
-    new_sd: dict = {}
-    for key, val in old_sd.items():
-        if key.endswith(".weight") and val.dim() == 3 and val.shape[0] == 8:
-            prefix = key[: -len(".weight")]
-            new_sd[f"{prefix}.w0"] = val[0]
-            new_sd[f"{prefix}.w1"] = val[1:4].mean(0)
-            new_sd[f"{prefix}.w2"] = val[4:7].mean(0)
-            new_sd[f"{prefix}.w3"] = val[7]
-        elif key.endswith(".grade_mask"):
-            pass  # buffer removed in new model
-        else:
-            new_sd[key] = val
-    ckpt["model_state_dict"] = new_sd
+    sd = ckpt["model_state_dict"]
+    sd, _ = _migrate_per_grade_linear(sd)
+    sd, _ = _migrate_l2_edge_embed(sd)
+    ckpt["model_state_dict"] = sd
     if new_path is not None:
         torch.save(ckpt, new_path)
     return ckpt

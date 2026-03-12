@@ -71,12 +71,13 @@ class CosineCutoff(nn.Module):
 
 
 class CliffordEdgeEmbedding(nn.Module):
-    """Edge features as grade-(0,1) multivectors + L=2 invariant features.
+    """Edge features as grade-(0,1) multivectors.
 
-    The L=2 symmetric traceless features (5 components from d⊗d)
-    are injected as additional invariant inputs to the radial networks,
-    giving the model access to d-orbital angular information that
-    Cl(3,0) cannot natively represent.
+    Scalar (grade-0) and vector (grade-1) edge features are produced from
+    RBF-expanded distances and unit direction vectors respectively. Only
+    distance-based (invariant) features feed the radial networks; the
+    direction enters equivariantly as a multiplier for grade-1 output.
+    The ``use_l2`` parameter is accepted but unused.
     """
 
     def __init__(
@@ -88,20 +89,16 @@ class CliffordEdgeEmbedding(nn.Module):
     ):
         super().__init__()
         self.n_channels = n_channels
-        self.use_l2 = use_l2
         self.rbf = RadialBasisFunctions(n_rbf, cutoff)
         self.cutoff_fn = CosineCutoff(cutoff)
 
-        # Input dim: RBF + optional L=2 features
-        in_dim = n_rbf + (5 if use_l2 else 0)
-
         self.scalar_net = nn.Sequential(
-            nn.Linear(in_dim, n_channels),
+            nn.Linear(n_rbf, n_channels),
             nn.SiLU(),
             nn.Linear(n_channels, n_channels),
         )
         self.vector_net = nn.Sequential(
-            nn.Linear(in_dim, n_channels),
+            nn.Linear(n_rbf, n_channels),
             nn.SiLU(),
             nn.Linear(n_channels, n_channels),
         )
@@ -116,21 +113,14 @@ class CliffordEdgeEmbedding(nn.Module):
         Returns:
             (E, C, 8) multivectors with grades 0 and 1 populated
         """
-        rbf = self.rbf(dist)  # (E, n_rbf)
+        rbf = self.rbf(dist)   # (E, n_rbf) — SO(3)-invariant
         env = self.cutoff_fn(dist)  # (E,)
 
-        # Concatenate RBF with L=2 features for richer angular info
-        if self.use_l2:
-            l2 = compute_l2_features(direction)  # (E, 5)
-            feat = torch.cat([rbf, l2], dim=-1)  # (E, n_rbf+5)
-        else:
-            feat = rbf
+        # Grade-0: scalar weights from invariant RBF only
+        g0 = (self.scalar_net(rbf) * env.unsqueeze(-1)).unsqueeze(-1)  # (E, C, 1)
 
-        # Grade-0: scalar weights
-        g0 = (self.scalar_net(feat) * env.unsqueeze(-1)).unsqueeze(-1)  # (E, C, 1)
-
-        # Grade-1: direction × invariant weight
-        v_w = self.vector_net(feat) * env.unsqueeze(-1)  # (E, C)
+        # Grade-1: direction × invariant weight — equivariant by construction
+        v_w = self.vector_net(rbf) * env.unsqueeze(-1)  # (E, C)
         g1 = v_w.unsqueeze(-1) * direction.unsqueeze(-2)  # (E, C, 3)
 
         return make_grades01_mv(g0, g1)
@@ -876,6 +866,41 @@ def smoke_test():
     print(f"Energy invariance error: {e_err:.2e}  {'✓' if e_pass else '✗'}")
     print(f"Force equivariance error: {f_err:.2e}  {'✓' if f_pass else '✗'}")
 
+    # Translation invariance
+    print("\n--- Translation Invariance Test ---")
+    with torch.no_grad():
+        t = torch.randn(3, device=device) * 3.0
+        pos_trans = pos + t  # uniform shift — distances unchanged, reuse edge_index
+        e3, f3 = model(atomic_numbers, pos_trans, edge_index, batch)
+    t_e_err = (e1 - e3).abs().item()
+    t_f_err = (f3 - f1).abs().max().item()
+    t_e_pass = t_e_err < 1e-4
+    t_f_pass = t_f_err < 1e-4
+    print(f"Energy translation invariance error: {t_e_err:.2e}  {'✓' if t_e_pass else '✗'}")
+    print(f"Force translation invariance error:  {t_f_err:.2e}  {'✓' if t_f_pass else '✗'}")
+
+    # O(3) reflection invariance (improper rotation, det = -1)
+    print("\n--- O(3) Reflection Test ---")
+    Q_imp, _ = torch.linalg.qr(torch.randn(3, 3))
+    if torch.det(Q_imp) > 0:
+        Q_imp[:, 0] *= -1  # force det = -1
+    with torch.no_grad():
+        pos_ref = pos @ Q_imp.T
+        sr2, dr2 = [], []
+        for i in range(N):
+            for j in range(N):
+                if i != j and (pos_ref[i] - pos_ref[j]).norm() < cutoff:
+                    sr2.append(i)
+                    dr2.append(j)
+        ei_ref = torch.tensor([sr2, dr2], dtype=torch.long, device=device)
+        e4, f4 = model(atomic_numbers, pos_ref, ei_ref, batch)
+    r_e_err = (e1 - e4).abs().item()
+    r_f_err = (f4 - f1 @ Q_imp.T).abs().max().item()
+    r_e_pass = r_e_err < 1e-3
+    r_f_pass = r_f_err < 1e-3
+    print(f"Energy O(3) invariance error: {r_e_err:.2e}  {'✓' if r_e_pass else '✗'}")
+    print(f"Force O(3) equivariance error: {r_f_err:.2e}  {'✓' if r_f_pass else '✗'}")
+
     # Gradients
     print("\n--- Gradient Test ---")
     model.train()
@@ -902,7 +927,7 @@ def smoke_test():
     print(f"All gradients present: {'✓' if grad_pass else '✗'}")
 
     print("\n" + "=" * 60)
-    all_pass = e_pass and f_pass and grad_pass
+    all_pass = e_pass and f_pass and t_e_pass and t_f_pass and grad_pass
     print(f"{'ALL TESTS PASSED ✓' if all_pass else 'SOME TESTS FAILED ✗'}")
     print("=" * 60)
     return all_pass

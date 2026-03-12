@@ -45,6 +45,7 @@ from cliffordip.cliffordip import (
     compute_gp_output_grades,
     compute_layer_grades,
     test_equivariance,
+    test_invariance,
 )
 
 # GNN backbone and training wrapper
@@ -65,4 +66,5 @@ __all__ = [
     "ExponentialMovingAverage",
     # Utilities
     "test_equivariance",
+    "test_invariance",
 ]

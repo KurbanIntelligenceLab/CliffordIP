@@ -509,6 +509,41 @@ def test_equivariance(model_fn=None, n_atoms=5, n_channels=16, atol=1e-5, seed=4
     return results
 
 
+def test_invariance(n_atoms: int = 5, n_channels: int = 16, atol: float = 1e-5, seed: int = 42) -> dict:
+    """Numerically verify O(3) invariance of Clifford algebra scalars and inner products."""
+    torch.manual_seed(seed)
+    alg = CliffordAlgebra()
+
+    a = torch.randn(n_atoms, n_channels, 8)
+    b = torch.randn(n_atoms, n_channels, 8)
+
+    bv = torch.randn(3)
+    bv = bv / (bv.norm() + 1e-8)
+    angle = torch.tensor([torch.pi * torch.rand(1).item()])
+    rotor = alg.rotor_from_bivector(bv.unsqueeze(0), angle.unsqueeze(0)).squeeze(0)
+
+    def rotate(mv: torch.Tensor) -> torch.Tensor:
+        return alg.sandwich_product(mv, rotor.expand_as(mv))
+
+    results = {}
+
+    # Scalar (grade-0) component is invariant under rotation
+    scalar_orig = a[..., S]
+    scalar_rot = rotate(a)[..., S]
+    scalar_err = (scalar_orig - scalar_rot).abs().max().item()
+    results["scalar_grade_invariance_error"] = scalar_err
+    results["scalar_grade_invariant"] = scalar_err < atol
+
+    # Inner product <a, b> = sum over components — invariant under rotation
+    inner_orig = (a * b).sum(dim=-1)
+    inner_rot = (rotate(a) * rotate(b)).sum(dim=-1)
+    inner_err = (inner_orig - inner_rot).abs().max().item()
+    results["inner_product_invariance_error"] = inner_err
+    results["inner_product_invariant"] = inner_err < atol
+
+    return results
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Cl(3,0) Clifford Algebra — Optimized Validation Suite")
@@ -560,6 +595,12 @@ if __name__ == "__main__":
     print("\n5. Equivariance:")
     results = test_equivariance()
     for k, v in results.items():
+        ok = (isinstance(v, bool) and v) or (isinstance(v, float) and v < 1e-5)
+        print(f"   {k}: {v}  {'✓' if ok else '✗'}")
+
+    print("\n5b. Invariance:")
+    inv_results = test_invariance()
+    for k, v in inv_results.items():
         ok = (isinstance(v, bool) and v) or (isinstance(v, float) and v < 1e-5)
         print(f"   {k}: {v}  {'✓' if ok else '✗'}")
 

@@ -1,18 +1,7 @@
 # Contributing to CliffordIP
 
-Thanks for your interest in CliffordIP. This document describes how changes get into this
-repository.
-
-## Ground rules
-
-- **`main` is protected.** Nobody pushes to `main` directly — all changes land through a pull
-  request.
-- **Every pull request needs an approving review from the maintainer**
-  ([@CalciumNitrade](https://github.com/CalciumNitrade), Can Polat) before it can be merged. This
-  is enforced by branch protection and by [`.github/CODEOWNERS`](.github/CODEOWNERS), which assigns
-  ownership of the whole tree to the maintainer.
-- Force-pushes and branch deletion on `main` are blocked.
-- New commits pushed to a PR dismiss existing approvals — the branch has to be re-approved.
+Thanks for your interest in CliffordIP. Changes land on `main` through pull requests reviewed by
+the maintainer ([@CalciumNitrade](https://github.com/CalciumNitrade), Can Polat).
 
 ## Workflow
 
@@ -41,11 +30,7 @@ repository.
    ```
 
 5. **Open a pull request** against `main` and fill out the template. The maintainer is requested as
-   a reviewer automatically via `CODEOWNERS`.
-
-6. **Address review feedback** by pushing additional commits to the same branch.
-
-7. The **maintainer merges** once the review is approved and any required checks are green.
+   a reviewer automatically.
 
 ## Coding standards
 

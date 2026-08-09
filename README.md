@@ -1,6 +1,19 @@
 # CliffordIP: Clifford Algebra Equivariant Interatomic Potentials for Heterogeneous Catalysis
 
+[![Paper](https://img.shields.io/badge/npj%20Comput%20Mater-10.1038%2Fs41524--026--02259--8-blue)](https://www.nature.com/articles/s41524-026-02259-8)
+[![PyPI](https://img.shields.io/pypi/v/cliffordip)](https://pypi.org/project/cliffordip/)
+
 Equivariant GNN for machine learning interatomic potentials (MLIPs) built on Clifford algebra Cl(3,0). Targets OC20, OC22, QM9, MD17, and any custom dataset via a plugin registry.
+
+> **Published in [npj Computational Materials](https://www.nature.com/articles/s41524-026-02259-8)** — Polat, C., Serpedin, E., Kurban, M. & Kurban, H. *CliffordIP: Clifford algebra equivariant interatomic potentials for heterogeneous catalysis.*
+
+## About
+
+Decarbonizing the global economy requires efficient catalysts for key electrochemical transformations, including CO₂ reduction, nitrogen reduction, and C–C coupling. Systematic catalyst discovery is limited by the cost of the density functional theory calculations needed to evaluate adsorbate–surface energetics across chemically diverse surfaces. MLIPs can accelerate this workflow, but many leading equivariant architectures rely on spherical harmonics and Clebsch–Gordan tensor products, increasing computational complexity and implementation overhead.
+
+CliffordIP is a message-passing interatomic potential built on the Clifford algebra Cl(3,0), representing atomic environments as 8-dimensional multivectors (scalars, vectors, bivectors, and pseudoscalars) coupled through the geometric product. This naturally captures bond directions, reaction planes, and local chirality relevant to catalytic intermediates, while enforcing full O(3) equivariance — including reflections — via the Pin(3) group.
+
+**Results.** On catalysis-focused adsorbate subsets, CliffordIP reduces energy MAE by 20–24% relative to the next-best baseline on CO2RR, N2RR, and C2 formation, and achieves the strongest in-distribution energy performance among the compared baselines on OC20 and OC22 under a unified, compute-constrained protocol, while remaining competitive in force magnitude.
 
 ## Installation
 
@@ -131,4 +144,20 @@ Baseline implementations (PaiNN, NequIP, SchNet, DimeNet++, EquiformerV2, GotenN
 ```python
 from cliffordip import test_equivariance
 test_equivariance()  # raises AssertionError if O(3) equivariance is broken
+```
+
+## Citation
+
+If you use CliffordIP in your research, please cite:
+
+```bibtex
+@article{polat2026cliffordip,
+  title={CliffordIP: Clifford algebra equivariant interatomic potentials for heterogeneous catalysis},
+  author={Polat, Can and Serpedin, Erchin and Kurban, Mustafa and Kurban, Hasan},
+  journal={npj Computational Materials},
+  year={2026},
+  publisher={Nature Publishing Group UK London},
+  doi={10.1038/s41524-026-02259-8},
+  url={https://www.nature.com/articles/s41524-026-02259-8}
+}
 ```

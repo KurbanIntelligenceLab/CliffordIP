@@ -12,7 +12,7 @@ import bisect
 import os
 import os.path as osp
 import pickle
-from typing import List, Literal, Optional
+from typing import Literal
 
 import lmdb
 import torch
@@ -68,7 +68,22 @@ def _resolve_lmdb_dir(root: str, task: str, split: str, oc22: bool = False) -> s
         if oc22
         else "OC20: https://fair-chem.github.io/catalysts/datasets/oc20.html"
     )
-    raise FileNotFoundError(f"LMDB directory not found for {task}/{split}. Tried: {candidates}\nDownload from {docs}")
+    raise FileNotFoundError(
+        f"LMDB directory not found for {task}/{split}. Tried: {candidates}\nDownload from {docs}"
+    )
+
+
+def _tensor(value) -> torch.Tensor:
+    return value if isinstance(value, torch.Tensor) else torch.tensor(value)
+
+
+def _scalar_id(value) -> int | str:
+    """Normalize a system or frame id to a scalar, defaulting to -1."""
+    if isinstance(value, (list | tuple)):
+        value = value[0] if value else None
+    if isinstance(value, torch.Tensor):
+        value = value.flatten()[0].item() if value.numel() else None
+    return value if isinstance(value, (int | str)) else -1
 
 
 class OC20LMDBDataset(Dataset):
@@ -96,9 +111,9 @@ class OC20LMDBDataset(Dataset):
     def __init__(
         self,
         root: str,
-        task: Task = "s2ef",
-        split: Split = "train",
-        max_samples: Optional[int] = None,
+        task: str = "s2ef",
+        split: str = "train",
+        max_samples: int | None = None,
         oc22: bool = False,
     ):
         super().__init__()
@@ -111,7 +126,9 @@ class OC20LMDBDataset(Dataset):
 
         # Discover all .lmdb files in the split directory.
         # OC20 stores data across multiple LMDB shards (data.0000.lmdb, data.0001.lmdb, etc.)
-        self.lmdb_paths = sorted([osp.join(self.lmdb_dir, f) for f in os.listdir(self.lmdb_dir) if f.endswith(".lmdb")])
+        self.lmdb_paths = sorted(
+            [osp.join(self.lmdb_dir, f) for f in os.listdir(self.lmdb_dir) if f.endswith(".lmdb")]
+        )
         if not self.lmdb_paths:
             raise FileNotFoundError(
                 f"No .lmdb files found in {self.lmdb_dir}. Ensure the data has been extracted correctly."
@@ -119,8 +136,8 @@ class OC20LMDBDataset(Dataset):
 
         # Count total entries across all shards (without loading data).
         # OC22 uses a "length" metadata key; OC20 uses sequential keys only.
-        self._shard_lengths: List[int] = []
-        self._cumulative_lengths: List[int] = []
+        self._shard_lengths: list[int] = []
+        self._cumulative_lengths: list[int] = []
         cumulative = 0
         for path in self.lmdb_paths:
             env = lmdb.open(
@@ -148,7 +165,7 @@ class OC20LMDBDataset(Dataset):
             self._total_len = min(self._total_len, max_samples)
 
         # Lazy-open LMDB environments (opened on first access per shard).
-        self._envs: List[Optional[lmdb.Environment]] = [None] * len(self.lmdb_paths)
+        self._envs: list[lmdb.Environment | None] = [None] * len(self.lmdb_paths)
 
     def _get_env(self, shard_idx: int) -> lmdb.Environment:
         if self._envs[shard_idx] is None:
@@ -161,7 +178,9 @@ class OC20LMDBDataset(Dataset):
                 meminit=False,
                 max_readers=256,
             )
-        return self._envs[shard_idx]
+        env = self._envs[shard_idx]
+        assert env is not None
+        return env
 
     def _global_to_shard(self, global_idx: int):
         """Map a global index to (shard_idx, local_idx)."""
@@ -193,137 +212,69 @@ class OC20LMDBDataset(Dataset):
         data = self._to_pyg_data(obj)
         return data
 
-    def _is_atomic_data(self, obj) -> bool:
-        """Check if obj is AtomicData (from scripts.data.data_utils.atomic_data)."""
-        return (
-            obj.__class__.__module__ == "scripts.data.data_utils.atomic_data"
-            and obj.__class__.__name__ == "AtomicData"
-        )
-
-    def _to_pyg_data(self, obj) -> Data:
-        """
-        Convert a raw LMDB entry (PyG Data or dict) to a standardized Data object.
-
-        Standardized fields:
-            data.z          : [natoms] int64 atomic numbers
-            data.pos        : [natoms, 3] float32 positions
-            data.y          : [1] float32 energy
-            data.force      : [natoms, 3] float32 forces  (S2EF only)
-            data.cell       : [3, 3] float32 unit cell
-            data.natoms     : int number of atoms
-            data.tags       : [natoms] int (0=sub, 1=surface, 2=adsorbate)
-            data.fixed      : [natoms] bool fixed-atom mask
-            data.sid        : system id
-            data.fid        : frame id
-        """
+    @staticmethod
+    def _as_mapping(obj) -> dict:
+        """Flatten an LMDB entry into a plain mapping of field name to value."""
+        if isinstance(obj, dict):
+            return obj
         if isinstance(obj, Data):
-            # LMDB stores PyG Data pickled by OCP.
-            # Some use __dict__ (IS2RE), others use _store (S2EF from preprocess_ef).
             d = dict(getattr(obj, "__dict__", {}))
-            store = d.get("_store")
+            store = d.pop("_store", None)
             if store is not None and hasattr(store, "keys"):
                 for k in store.keys():
-                    if k not in d:
-                        d[k] = store[k]
-            data = Data()
-            _t = lambda v: torch.tensor(v) if not isinstance(v, torch.Tensor) else v
-            if "atomic_numbers" in d:
-                data.z = _t(d["atomic_numbers"]).long()
-            elif "z" in d:
-                data.z = _t(d["z"]).long()
-            if "pos" in d:
-                data.pos = _t(d["pos"]).float()
-            if "y_relaxed" in d and d["y_relaxed"] is not None:
-                data.y = _t(d["y_relaxed"]).float().view(-1)
-            elif "y" in d and d["y"] is not None:
-                data.y = _t(d["y"]).float().view(-1)
-            elif "energy" in d and d["energy"] is not None:
-                data.y = _t(d["energy"]).float().view(-1)
-            if "force" in d and d["force"] is not None:
-                data.force = _t(d["force"]).float()
-            elif "forces" in d and d["forces"] is not None:
-                data.force = _t(d["forces"]).float()
-            if "cell" in d:
-                c = _t(d["cell"])
-                data.cell = c.squeeze(0).float() if c.dim() == 3 else c.float()
-            if "tags" in d:
-                data.tags = _t(d["tags"]).long()
-            if "fixed" in d:
-                data.fixed = _t(d["fixed"]).bool()
-            if data.pos is None:
-                raise ValueError("LMDB entry missing pos")
-            data.natoms = data.pos.size(0)
-            data.sid = d.get("sid", -1)
-            data.fid = d.get("fid", -1)
-            if not hasattr(data, "z") or data.z is None:
-                data.z = data.pos.new_zeros(data.natoms, dtype=torch.long)
-            if not hasattr(data, "y") or data.y is None:
-                data.y = data.pos.new_zeros(1)
-            return data
+                    d.setdefault(k, store[k])
+            return d
+        raise TypeError(f"Unexpected LMDB entry type: {type(obj)}. Expected PyG Data or dict.")
 
-        elif self._is_atomic_data(obj):
-            # OC20 S2EF preprocessed with fairchem/OCP stores AtomicData (scripts.data.data_utils.atomic_data)
-            data = Data()
-            _t = lambda v: torch.tensor(v) if not isinstance(v, torch.Tensor) else v
-            data.z = _t(obj.atomic_numbers).long()
-            data.pos = _t(obj.pos).float()
-            data.y = (
-                _t(obj.energy).float().view(-1)
-                if hasattr(obj, "energy") and obj.energy is not None
-                else obj.pos.new_zeros(1)
-            )
-            data.force = (
-                _t(obj.forces).float()
-                if hasattr(obj, "forces") and obj.forces is not None
-                else obj.pos.new_zeros(obj.pos.shape[0], 3)
-            )
-            c = _t(obj.cell)
-            data.cell = c.squeeze(0).float() if c.dim() == 3 else c.float()
-            data.tags = _t(obj.tags).long()
-            data.fixed = _t(obj.fixed).bool()
-            data.natoms = data.pos.size(0)
-            sid = getattr(obj, "sid", None)
-            if isinstance(sid, (int, str)):
-                data.sid = sid
-            elif isinstance(sid, (list, tuple)) and sid:
-                data.sid = sid[0]
-            else:
-                data.sid = -1
-            return data
+    @staticmethod
+    def _first(d: dict, *names):
+        """First present, non-None value among ``names``."""
+        for name in names:
+            if d.get(name) is not None:
+                return d[name]
+        return None
 
-        elif isinstance(obj, dict):
-            # Some OC20 versions store entries as dicts.
-            data = Data()
-            data.z = torch.tensor(obj.get("atomic_numbers", obj.get("z")), dtype=torch.long)
-            data.pos = torch.tensor(obj["pos"], dtype=torch.float32)
+    def _to_pyg_data(self, obj) -> Data:
+        """Convert an LMDB entry to a Data with standardized field names.
 
-            if "y" in obj:
-                data.y = torch.tensor([obj["y"]], dtype=torch.float32)
-            elif "y_relaxed" in obj:
-                data.y = torch.tensor([obj["y_relaxed"]], dtype=torch.float32)
+        Fields: ``z`` (int64), ``pos``, ``y``, ``force``, ``cell``, ``natoms``,
+        ``tags``, ``fixed``, ``sid``, ``fid``.
+        """
+        d = self._as_mapping(obj)
+        data = Data()
 
-            if "force" in obj:
-                data.force = torch.tensor(obj["force"], dtype=torch.float32)
-            elif "forces" in obj:
-                data.force = torch.tensor(obj["forces"], dtype=torch.float32)
+        pos = self._first(d, "pos")
+        if pos is None:
+            raise ValueError("LMDB entry has no positions")
+        data.pos = _tensor(pos).float()
+        data.natoms = data.pos.size(0)
 
-            if "cell" in obj:
-                data.cell = torch.tensor(obj["cell"], dtype=torch.float32).view(3, 3)
+        z = self._first(d, "atomic_numbers", "z")
+        data.z = _tensor(z).long() if z is not None else torch.zeros(data.natoms, dtype=torch.long)
 
-            if "tags" in obj:
-                data.tags = torch.tensor(obj["tags"], dtype=torch.long)
+        y = self._first(d, "y_relaxed", "y", "energy")
+        data.y = _tensor(y).float().view(-1) if y is not None else torch.zeros(1)
 
-            if "fixed" in obj:
-                data.fixed = torch.tensor(obj["fixed"], dtype=torch.bool)
+        force = self._first(d, "force", "forces")
+        if force is not None:
+            data.force = _tensor(force).float()
 
-            data.natoms = data.pos.size(0)
-            data.sid = obj.get("sid", -1)
-            data.fid = obj.get("fid", -1)
+        cell = self._first(d, "cell")
+        if cell is not None:
+            c = _tensor(cell).float()
+            data.cell = c.squeeze(0) if c.dim() == 3 else c.view(3, 3)
 
-            return data
+        tags = self._first(d, "tags")
+        if tags is not None:
+            data.tags = _tensor(tags).long()
 
-        else:
-            raise TypeError(f"Unexpected LMDB entry type: {type(obj)}. Expected PyG Data or dict.")
+        fixed = self._first(d, "fixed")
+        if fixed is not None:
+            data.fixed = _tensor(fixed).bool()
+
+        data.sid = _scalar_id(d.get("sid"))
+        data.fid = _scalar_id(d.get("fid"))
+        return data
 
     def _close_envs(self):
         """Close and null all LMDB environments so they reopen lazily.

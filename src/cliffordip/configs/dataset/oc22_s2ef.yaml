@@ -1,10 +1,9 @@
 # OC22 S2EF-Total dataset config — oxide electrocatalysis, energy + forces
 # https://fair-chem.github.io/catalysts/datasets/oc22.html
 dataset:
-  name: oc22
+  name: oc22_s2ef
   data_root: data/OC22
   task_type: s2ef
-  target_name: s2ef
   task: s2ef
   split_train: train
   split_val: val_id

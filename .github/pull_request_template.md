@@ -13,9 +13,10 @@
 ## Checklist
 
 - [ ] Branched off `main` — I am **not** pushing directly to `main`
-- [ ] `python -c "from cliffordip import test_equivariance; test_equivariance()"` passes
+- [ ] `uv run pytest` passes, including `tests/test_equivariance.py`
+- [ ] `uv run ruff check .`, `uv run ruff format --check .` and `uv run mypy` pass
 - [ ] Tests added or updated for the changed behavior
-- [ ] `README.md` updated if user-facing behavior changed
+- [ ] `README.md` and `CHANGELOG.md` updated if user-facing behavior changed
 - [ ] No large data files, checkpoints, or credentials committed
 
 ## Related issues

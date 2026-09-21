@@ -1,71 +1,58 @@
+"""Dataset registry and DataLoader construction.
+
+Register an in-tree dataset with ``@register_dataset("name")``. Out-of-tree
+packages advertise factories under the ``cliffordip.datasets`` entry-point group.
 """
-Dataset registry with decorator-based registration.
-
-Adding a new dataset:
-    1. Create datasets/_register_mydataset.py
-    2. Write a factory function decorated with @register_dataset("mydataset")
-    3. The factory receives the full OmegaConf config and returns a list of
-       loader dicts: [{"train": DataLoader, "val": DataLoader, ...}, ...]
-    4. Import the registration file in datasets/__init__.py
-
-That's it -- zero changes to dataset_registry.py, config_utils.py, or the trainer.
-"""
-
-from typing import Callable, Dict, List, Optional
 
 import torch
 from omegaconf import DictConfig
 from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader
 
-_DATASET_REGISTRY: Dict[str, Callable[[DictConfig], list]] = {}
+from cliffordip.train.registry import Registry
+
+DATASETS: Registry[list] = Registry("dataset", entry_point_group="cliffordip.datasets")
 
 
 def register_dataset(name: str):
-    """Decorator to register a dataset factory function.
+    """Decorator registering a ``(cfg) -> list[dict]`` factory under ``name``.
 
-    The factory function signature must be:
-        def factory(cfg: DictConfig) -> list[dict]
-
-    Each dict in the returned list represents one fold/split with keys:
-        - "train": DataLoader (required)
-        - "val": DataLoader (required)
-        - "test": DataLoader (optional)
-        - "extra_parts": list[str] (optional, for output directory naming)
-        - "runtime_stats": dict (optional, e.g. z-score mean/std)
+    Each dict describes one split group with keys ``train`` and ``val``, and
+    optionally ``test``, ``extra_parts`` and ``runtime_stats``.
     """
+    return DATASETS.register(name)
 
-    def decorator(factory_fn: Callable[[DictConfig], list]):
-        if name in _DATASET_REGISTRY:
-            raise ValueError(
-                f"Dataset '{name}' already registered. "
-                f"Existing: {_DATASET_REGISTRY[name].__module__}.{_DATASET_REGISTRY[name].__name__}, "
-                f"New: {factory_fn.__module__}.{factory_fn.__name__}"
-            )
-        _DATASET_REGISTRY[name] = factory_fn
-        return factory_fn
 
-    return decorator
+def mark_unavailable(name: str, reason: str) -> None:
+    """Record why a dataset could not be imported, for use in error messages."""
+    DATASETS.mark_unavailable(name, reason)
+
+
+def _supports_lmdb_reopen(dataset) -> bool:
+    """Whether ``dataset`` (or the dataset a Subset wraps) holds LMDB handles."""
+    return hasattr(dataset, "_close_envs") or hasattr(
+        getattr(dataset, "dataset", None), "_close_envs"
+    )
+
+
+def _close_envs(dataset) -> None:
+    target = dataset if hasattr(dataset, "_close_envs") else getattr(dataset, "dataset", None)
+    if target is not None:
+        target._close_envs()
 
 
 def _lmdb_worker_init_fn(worker_id):
-    """Force each DataLoader worker to reopen LMDB environments.
-
-    LMDB file descriptors are not safe across fork boundaries.
-    This ensures each worker gets its own file descriptors.
-    """
-    worker_info = torch.utils.data.get_worker_info()
-    if worker_info is not None:
-        ds = worker_info.dataset
-        if hasattr(ds, "_close_envs"):
-            ds._close_envs()
+    """Reopen LMDB environments in each worker; the handles are not fork-safe."""
+    info = torch.utils.data.get_worker_info()
+    if info is not None:
+        _close_envs(info.dataset)
 
 
 def build_loader(
     dataset: Dataset,
     cfg: DictConfig,
     shuffle: bool = False,
-    generator: Optional[torch.Generator] = None,
+    generator: torch.Generator | None = None,
 ) -> DataLoader:
     """Create a DataLoader with shared performance settings from config.
 
@@ -79,7 +66,7 @@ def build_loader(
     prefetch_factor = cfg.training.get("prefetch_factor", 2) if num_workers > 0 else None
 
     # Use LMDB-safe worker init if dataset supports it
-    worker_init = _lmdb_worker_init_fn if hasattr(dataset, "_close_envs") else None
+    worker_init = _lmdb_worker_init_fn if _supports_lmdb_reopen(dataset) else None
 
     kwargs = dict(
         batch_size=batch_size,
@@ -98,18 +85,13 @@ def build_loader(
 
 
 def build_dataloaders(cfg: DictConfig) -> list:
-    """Instantiate dataset loaders from the registry using the merged config."""
-    dataset_name = cfg.dataset.name
-    if dataset_name not in _DATASET_REGISTRY:
-        available = ", ".join(sorted(_DATASET_REGISTRY.keys()))
-        raise KeyError(
-            f"Dataset '{dataset_name}' not found in registry. "
-            f"Available datasets: [{available}]. "
-            f"Did you forget to import datasets._register_{dataset_name}?"
-        )
-    return _DATASET_REGISTRY[dataset_name](cfg)
+    """Instantiate dataset loaders for ``cfg.dataset.name``."""
+    return DATASETS.get(cfg.dataset.name)(cfg)
 
 
-def list_datasets() -> List[str]:
-    """Return sorted list of registered dataset names."""
-    return sorted(_DATASET_REGISTRY.keys())
+def list_datasets() -> list[str]:
+    return DATASETS.names()
+
+
+def unavailable_datasets() -> dict[str, str]:
+    return DATASETS.unavailable()

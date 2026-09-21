@@ -1,9 +1,8 @@
 # OC20 IS2RE dataset config — single split, energy only, L1 loss + EwT metric
 dataset:
-  name: oc20
+  name: oc20_is2re
   data_root: data/OC20
   task_type: is2re
-  target_name: is2re
   task: is2re
   split_train: train
   split_val: val_id

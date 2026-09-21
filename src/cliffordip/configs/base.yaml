@@ -1,58 +1,27 @@
-# ============================================================
-# Base configuration — shared defaults for all experiments.
-# Merge order: base -> dataset -> model -> override yaml -> CLI
-# ============================================================
+# Shared defaults. Merge order: base -> dataset -> model -> override yaml -> CLI.
 
 seed: 42
-device: auto            # "auto" -> cuda if available, else cpu
-output_root: results
 
 training:
-  epochs: 10
   batch_size: 32
   lr: 1.0e-4
   weight_decay: 0.0
-  optimizer: adam        # adam | adamw
-  grad_clip: null        # optional gradient clipping max norm
-  grad_accum_steps: 1    # gradient accumulation (effective batch = batch_size * steps)
+  optimizer: adam          # adam | adamw
+  lr_scheduler: null       # null | step | cosine | plateau
 
-  # DataLoader performance
-  num_workers: 0         # set to 4 on GPU machines for faster data loading
-  pin_memory: false      # set to true when training on GPU
-  persistent_workers: false  # keep workers alive between epochs (requires num_workers > 0)
-  prefetch_factor: 4     # batches to prefetch per worker (requires num_workers > 0)
-
-  # Mixed precision (AMP)
-  amp: false             # enable via CLI: training.amp=true
-  amp_dtype: bfloat16    # bfloat16 or float16
-
-  # Validation frequency
-  val_every: 1           # validate every N epochs; 5 recommended for long runs
-
-  # Early stopping (disabled by default)
-  early_stopping:
-    patience: 0          # 0 = disabled; stop after N epochs without improvement
-
-  # EMA (disabled by default)
-  ema:
-    enabled: false
-    decay: 0.999
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  prefetch_factor: 4
 
 dataset:
-  name: null            # must be set (qm9, md17, molecule3d, transition1x, oc20)
-  data_root: null       # must be set per dataset
-  task_type: scalar     # scalar | energy_forces | s2ef | is2re
-  force_weight: 1.0     # weight for force loss in energy_forces/s2ef tasks
+  name: null               # required
+  data_root: null          # required
+  task_type: scalar        # scalar | energy_forces | s2ef | is2re
+  force_weight: 1.0
+  val_subsample_frac: null # keep this leading fraction of the validation split
 
 model:
-  name: null            # must be set (schnet, dimenetpp, gotennet, ...)
-  interface: pyg_native # pyg_native | data_wrapper
+  name: null               # required
+  interface: data_wrapper
   cutoff: 5.0
-
-logging:
-  print_every: 1        # print every N epochs
-  wandb:
-    enabled: false      # opt-in; enable via CLI: logging.wandb.enabled=true
-    project: "mlip-bench"
-    entity: null        # W&B team/user; null = personal default
-    tags: []

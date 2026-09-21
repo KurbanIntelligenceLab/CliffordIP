@@ -14,31 +14,37 @@ the maintainer ([@CalciumNitrade](https://github.com/CalciumNitrade), Can Polat)
 2. **Set up the development environment.**
 
    ```bash
-   uv pip install -e ".[dev]"
+   uv sync
+   uv run pre-commit install
    ```
 
 3. **Make your change**, keeping it focused — one logical change per pull request.
 
-4. **Verify locally** before opening the PR:
+4. **Verify locally** before opening the PR — CI runs exactly these:
 
    ```bash
-   # O(3)/Pin(3) equivariance must hold — this is the core invariant of the model
-   python -c "from cliffordip import test_equivariance; test_equivariance()"
-
-   pytest
-   ruff check .
+   uv run ruff check .
+   uv run ruff format --check .
+   uv run mypy
+   uv run pytest
    ```
+
+   Any change under `src/cliffordip/cliffordip.py`, `interaction.py` or `neighbors.py` must keep
+   `uv run pytest tests/test_equivariance.py` green. O(3) equivariance, including reflections, is
+   the core invariant of the model.
 
 5. **Open a pull request** against `main` and fill out the template. The maintainer is requested as
    a reviewer automatically.
 
 ## Coding standards
 
-- Strict typing: use `Literal` for enumerated values; avoid `None` and `Any` unless genuinely
-  necessary, and call it out in the PR description when you do.
+- Type new code. `cliffordip.config`, `cliffordip.neighbors`, `cliffordip.train.registry` and
+  `cliffordip.train.checkpoints` are checked with `disallow_untyped_defs`; keep them that way.
 - Keep the forward pass allocation-free where the existing code is — pre-allocated multivector
   tensors filled via index slices are required for `torch.compile` stability.
-- Update `README.md` whenever user-facing behavior changes.
+- Update `README.md` and `CHANGELOG.md` whenever user-facing behavior changes.
+- Comments explain what the code does now; keep docstrings to one line unless the name needs more.
+- New behaviour comes with a test. Anything needing a downloaded dataset is marked `slow`.
 
 ## Reporting bugs and requesting features
 

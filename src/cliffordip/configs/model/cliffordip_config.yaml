@@ -1,8 +1,8 @@
-# Clifford model config — data_wrapper interface
-# Cl(3,0) geometric algebra message passing with progressive grade activation
+# CliffordIP: Cl(3,0) message passing with progressive grade activation.
 model:
   name: cliffordip
   interface: data_wrapper
+
   n_atom_types: 100
   n_channels: 52
   n_interactions: 5
@@ -10,3 +10,16 @@ model:
   cutoff: 6.0
   n_hidden_output: 52
   max_neighbors: 50
+
+  use_attention: true
+  use_self_interaction: true
+  max_body_order: 3
+  use_multiscale: true
+  use_gp_readout: true
+  n_heads: 4
+
+  use_dens: false
+  dens_noise_std: 0.01
+
+  use_compile: false
+  compile_mode: reduce-overhead

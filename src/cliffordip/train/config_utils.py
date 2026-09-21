@@ -1,26 +1,21 @@
-"""
-Configuration loading with omegaconf merge chain.
+"""Configuration loading with an omegaconf merge chain.
 
-Merge order (later overrides earlier):
-    1. configs/base.yaml           -- global defaults
-    2. configs/dataset/{name}.yaml  -- dataset-specific defaults
-    3. models/{name}/config.yaml    -- model architecture defaults (colocated with model)
-    4. --config <path.yaml>         -- user override file (optional)
-    5. CLI dot-overrides            -- e.g., training.lr=1e-3
-
-Usage:
-    python trainers/train_qm9.py dataset.name=qm9 model.name=schnet training.lr=1e-3
-    python trainers/train_qm9.py dataset.name=qm9 model.name=schnet --config my_overrides.yaml
+Merge order, later overriding earlier:
+    1. configs/base.yaml
+    2. configs/dataset/{name}.yaml
+    3. configs/model/{name}_config.yaml
+    4. --config <path.yaml>
+    5. CLI dot-overrides, e.g. training.lr=1e-3
 """
 
 import sys
 from importlib.resources import files as _resource_files
 from pathlib import Path
+from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
 _CONFIGS_DIR: Path = Path(str(_resource_files("cliffordip").joinpath("configs")))
-_MODELS_DIR: Path = Path(str(_resource_files("cliffordip").joinpath("models")))
 
 
 def _find_yaml(subdir: str, name: str) -> Path:
@@ -33,17 +28,14 @@ def _find_yaml(subdir: str, name: str) -> Path:
 
 
 def _find_model_config(name: str) -> Path:
-    """Find model config in models/{name}/config.yaml or configs/model/{name}_config.yaml."""
-    path = _MODELS_DIR / name / "config.yaml"
-    if path.exists():
-        return path
+    """Find configs/model/{name}_config.yaml."""
     path = _CONFIGS_DIR / "model" / f"{name}_config.yaml"
     if path.exists():
         return path
     available = sorted(
         p.stem.replace("_config", "") for p in (_CONFIGS_DIR / "model").glob("*_config.yaml")
-    ) + (sorted(p.name for p in _MODELS_DIR.iterdir() if p.is_dir() and (p / "config.yaml").exists()) if _MODELS_DIR.exists() else [])
-    raise FileNotFoundError(f"Model config not found for '{name}'\nAvailable: {available}")
+    )
+    raise FileNotFoundError(f"Model config not found for '{name}'. Available: {available}")
 
 
 def load_config(argv=None, defaults=None) -> DictConfig:
@@ -90,31 +82,28 @@ def load_config(argv=None, defaults=None) -> DictConfig:
 
     # 2. Dataset config
     dataset_name = OmegaConf.select(peek, "dataset.name", default=None)
-    dataset_conf = OmegaConf.create()
+    dataset_conf: Any = OmegaConf.create()
     if dataset_name and isinstance(dataset_name, str):
-        try:
-            dataset_conf = OmegaConf.load(_find_yaml("dataset", dataset_name))
-        except FileNotFoundError:
-            pass  # dataset YAML is optional if defaults cover everything
+        dataset_conf = OmegaConf.load(_find_yaml("dataset", dataset_name))
 
     # 3. Model config (from models/{name}/config.yaml)
     model_name = OmegaConf.select(peek, "model.name", default=None)
-    model_conf = OmegaConf.create()
+    model_conf: Any = OmegaConf.create()
     if model_name and isinstance(model_name, str):
-        try:
-            model_conf = OmegaConf.load(_find_model_config(model_name))
-        except FileNotFoundError:
-            pass  # model YAML is optional
+        model_conf = OmegaConf.load(_find_model_config(model_name))
 
     # 4. Optional override YAML
-    override_conf = OmegaConf.create()
+    override_conf: Any = OmegaConf.create()
     if override_yaml_path:
         override_conf = OmegaConf.load(override_yaml_path)
 
     # 5. Final merge: base -> defaults -> dataset -> model -> override_yaml -> CLI
-    cfg = OmegaConf.merge(base_conf, defaults_conf, dataset_conf, model_conf, override_conf, cli_conf)
+    cfg = OmegaConf.merge(
+        base_conf, defaults_conf, dataset_conf, model_conf, override_conf, cli_conf
+    )
 
     # Resolve interpolations
     OmegaConf.resolve(cfg)
 
+    assert isinstance(cfg, DictConfig)
     return cfg

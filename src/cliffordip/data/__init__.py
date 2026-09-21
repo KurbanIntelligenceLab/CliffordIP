@@ -1,15 +1,29 @@
-"""Dataset adapters — each submodule registers datasets via @register_dataset on import."""
+"""Dataset adapters. Each submodule registers its datasets on import."""
 
-# OC20/OC22: require lmdb extra (pip install cliffordip[oc20])
-try:
-    from cliffordip.data import oc20  # noqa: F401
-    from cliffordip.data import oc22  # noqa: F401
-except ImportError:
-    pass
+import importlib
 
-# QM9/MD17: require ase extra (pip install cliffordip[qm9] / [md17])
-try:
-    from cliffordip.data import qm9   # noqa: F401
-    from cliffordip.data import md17  # noqa: F401
-except ImportError:
-    pass
+from cliffordip.train.dataset_registry import mark_unavailable
+
+# module -> (dataset names it provides, extra that supplies its dependencies)
+_MODULES = {
+    "oc20": (
+        ("oc20", "oc20_s2ef", "oc20_is2re", "oc20_s2ef_co2rr", "oc20_s2ef_nrr", "oc20_s2ef_c2"),
+        "oc20",
+    ),
+    "oc22": (("oc22_s2ef", "oc22_is2re"), "oc22"),
+    "qm9": (("qm9",), "qm9"),
+    "md17": (("md17",), "md17"),
+}
+
+
+def _load_all() -> None:
+    for module, (names, extra) in _MODULES.items():
+        try:
+            importlib.import_module(f"cliffordip.data.{module}")
+        except ImportError as exc:
+            reason = f"{exc}; install with: pip install 'cliffordip[{extra}]'"
+            for name in names:
+                mark_unavailable(name, reason)
+
+
+_load_all()

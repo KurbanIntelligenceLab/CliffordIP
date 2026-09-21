@@ -4,20 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
+import lightning as L
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
-import lightning as L
 
+from cliffordip.train.checkpoints import migrate_state_dict
 from cliffordip.train.training_utils import (
+    _get_free_atom_mask,
+    _l2norm_loss,
+    _per_atom_mae_loss,
     build_optimizer,
     build_scheduler,
     compute_loss,
-    compute_forces,
     forward_model,
-    _get_free_atom_mask,
-    _per_atom_mae_loss,
-    _l2norm_loss,
 )
 from cliffordip.wrapper import CliffordIPWrapper
 
@@ -46,31 +46,16 @@ class CliffordIPLightningModule(L.LightningModule):
         self.save_hyperparameters({"cfg": OmegaConf.to_container(cfg, resolve=True)})
 
         self.cfg = cfg
-        m = cfg.model
-        self.model = CliffordIPWrapper(
-            n_atom_types=m.get("n_atom_types", 100),
-            n_channels=m.n_channels,
-            n_interactions=m.n_interactions,
-            n_rbf=m.get("n_rbf", 20),
-            cutoff=m.cutoff,
-            n_hidden_output=m.get("n_hidden_output", 64),
-            max_neighbors=m.get("max_neighbors", 50),
-            direct_forces=m.get("direct_forces", True),
-            use_attention=m.get("use_attention", True),
-            use_self_interaction=m.get("use_self_interaction", True),
-            max_body_order=m.get("max_body_order", 3),
-            use_l2=m.get("use_l2", True),
-            use_multiscale=m.get("use_multiscale", True),
-            use_gp_readout=m.get("use_gp_readout", True),
-            n_heads=m.get("n_heads", 4),
-            use_dens=m.get("use_dens", False),
-            use_ema=False,   # EMA handled by EMACallback instead
-            use_compile=m.get("use_compile", False),
-        )
+        self.model = CliffordIPWrapper.from_mapping(OmegaConf.to_container(cfg.model, resolve=True))
 
         self._task_type: str = cfg.dataset.get("task_type", "scalar")
         self._interface: str = cfg.model.get("interface", "data_wrapper")
         self.dens_weight: float = 0.0  # Set by DeNSCallback if active
+
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        """Accept state dicts written by earlier versions."""
+        if "state_dict" in checkpoint:
+            checkpoint["state_dict"] = migrate_state_dict(checkpoint["state_dict"])
 
     # ------------------------------------------------------------------
     # Training
@@ -98,7 +83,7 @@ class CliffordIPLightningModule(L.LightningModule):
     # Optimizers / schedulers
     # ------------------------------------------------------------------
 
-    def configure_optimizers(self) -> dict:
+    def configure_optimizers(self) -> Any:
         opt = build_optimizer(self.cfg, self.model)
         sched = build_scheduler(self.cfg, opt)
         if sched is None:
@@ -129,9 +114,9 @@ class CliffordIPLightningModule(L.LightningModule):
         data.pos.requires_grad_(True)
         energy_pred, forces_pred, dens_loss = self.model.forward_with_dens(data)
 
-        energy_target = (
-            data.energy.view(-1) if hasattr(data, "energy") else data.y.view(-1)
-        ).to(energy_pred.dtype)
+        energy_target = (data.energy.view(-1) if hasattr(data, "energy") else data.y.view(-1)).to(
+            energy_pred.dtype
+        )
         forces_target = data.force.to(forces_pred.dtype)
 
         if cfg.dataset.get("train_on_free_atoms", False):
@@ -142,7 +127,9 @@ class CliffordIPLightningModule(L.LightningModule):
 
         e_loss_type = cfg.dataset.get("energy_loss", None)
         loss_e = (
-            _per_atom_mae_loss(energy_pred, energy_target, torch.bincount(data.batch).to(energy_pred.dtype))
+            _per_atom_mae_loss(
+                energy_pred, energy_target, torch.bincount(data.batch).to(energy_pred.dtype)
+            )
             if e_loss_type == "per_atom_mae"
             else loss_fn(energy_pred, energy_target)
         )
@@ -179,19 +166,12 @@ class CliffordIPLightningModule(L.LightningModule):
                 ae = (pred - target).abs()
                 return {"mae": ae.mean(), "ewt": (ae <= ewt_thresh).float().mean() * 100.0}
 
-        # S2EF / energy_forces: autograd forces require grad to be enabled
-        with torch.enable_grad():
-            data.pos.requires_grad_(True)
-            out = forward_model(self.model, data, self._interface)
-            if isinstance(out, tuple):
-                energy_pred, forces_pred = out
-            else:
-                energy_pred = out
-                forces_pred = compute_forces(energy_pred, data.pos, create_graph=False)
+        with torch.no_grad():
+            energy_pred, forces_pred = forward_model(self.model, data, self._interface)
 
-        energy_target = (
-            data.energy.view(-1) if hasattr(data, "energy") else data.y.view(-1)
-        ).to(energy_pred.dtype)
+        energy_target = (data.energy.view(-1) if hasattr(data, "energy") else data.y.view(-1)).to(
+            energy_pred.dtype
+        )
         forces_target = data.force.to(forces_pred.dtype)
 
         if cfg.dataset.get("eval_on_free_atoms", False):

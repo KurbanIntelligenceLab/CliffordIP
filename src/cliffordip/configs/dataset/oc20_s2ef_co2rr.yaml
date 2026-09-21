@@ -1,10 +1,9 @@
 # OC20 S2EF CO2RR — CO2 reduction subset (*CO, *COOH, *CHO, etc.)
 # Tier 3: Focused catalysis analysis for CO2RR selectivity
 dataset:
-  name: oc20
+  name: oc20_s2ef_co2rr
   data_root: data/OC20
   task_type: s2ef
-  target_name: s2ef
   task: s2ef
   split_train: train
   split_val: val_id

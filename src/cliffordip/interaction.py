@@ -5,12 +5,11 @@ Grade-sparse GP dispatch, equivariant attention, multi-body interactions,
 per-layer energy readout, and DeNS auxiliary objective support.
 """
 
-from typing import Optional, Tuple
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_scatter import scatter, scatter_softmax
+from torch_geometric.utils import scatter
+from torch_geometric.utils import softmax as scatter_softmax
 
 from .cliffordip import (
     ALL_GRADES,
@@ -20,11 +19,9 @@ from .cliffordip import (
     CliffordIPNorm,
     compute_gp_output_grades,
     compute_layer_grades,
-    compute_l2_features,
     make_grades01_mv,
     make_scalar_mv,
 )
-
 
 # ============================================================
 # Radial Basis + Cutoff
@@ -60,13 +57,11 @@ class CosineCutoff(nn.Module):
         self.cutoff = cutoff
 
     def forward(self, dist: torch.Tensor) -> torch.Tensor:
-        return 0.5 * (torch.cos(dist * torch.pi / self.cutoff) + 1.0) * (
-            dist < self.cutoff
-        ).float()
+        return 0.5 * (torch.cos(dist * torch.pi / self.cutoff) + 1.0) * (dist < self.cutoff).float()
 
 
 # ============================================================
-# Edge Embedding with L=2 augmentation
+# Edge Embedding
 # ============================================================
 
 
@@ -77,7 +72,6 @@ class CliffordEdgeEmbedding(nn.Module):
     RBF-expanded distances and unit direction vectors respectively. Only
     distance-based (invariant) features feed the radial networks; the
     direction enters equivariantly as a multiplier for grade-1 output.
-    The ``use_l2`` parameter is accepted but unused.
     """
 
     def __init__(
@@ -85,7 +79,6 @@ class CliffordEdgeEmbedding(nn.Module):
         n_rbf: int = 20,
         n_channels: int = 128,
         cutoff: float = 5.0,
-        use_l2: bool = True,
     ):
         super().__init__()
         self.n_channels = n_channels
@@ -103,9 +96,7 @@ class CliffordEdgeEmbedding(nn.Module):
             nn.Linear(n_channels, n_channels),
         )
 
-    def forward(
-        self, dist: torch.Tensor, direction: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, dist: torch.Tensor, direction: torch.Tensor) -> torch.Tensor:
         """
         Args:
             dist: (E,) distances
@@ -113,7 +104,7 @@ class CliffordEdgeEmbedding(nn.Module):
         Returns:
             (E, C, 8) multivectors with grades 0 and 1 populated
         """
-        rbf = self.rbf(dist)   # (E, n_rbf) — SO(3)-invariant
+        rbf = self.rbf(dist)  # (E, n_rbf) — SO(3)-invariant
         env = self.cutoff_fn(dist)  # (E,)
 
         # Grade-0: scalar weights from invariant RBF only
@@ -158,44 +149,31 @@ class CliffordAttention(nn.Module):
 
     def __init__(self, n_channels: int, n_heads: int = 4, n_rbf: int = 20):
         super().__init__()
+        assert n_channels % n_heads == 0
         self.n_heads = n_heads
         self.head_dim = n_channels // n_heads
-        assert n_channels % n_heads == 0
 
         self.q_proj = nn.Linear(n_channels, n_channels, bias=False)
         self.k_proj = nn.Linear(n_channels, n_channels, bias=False)
         self.rbf_proj = nn.Linear(n_rbf, n_channels, bias=False)
-        self.rbf = RadialBasisFunctions(n_rbf)
 
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
 
     def forward(
         self,
-        h_i: torch.Tensor,      # (E, C) — receiver grade-0 features
-        h_j: torch.Tensor,      # (E, C) — sender grade-0 features
-        dist: torch.Tensor,     # (E,)
-        dst: torch.Tensor,      # (E,) — destination indices
-        n_nodes: int,
-        rbf: Optional[torch.Tensor] = None,  # (E, n_rbf) pre-computed RBF
+        h_i: torch.Tensor,  # (E, C) — receiver grade-0 features
+        h_j: torch.Tensor,  # (E, C) — sender grade-0 features
+        dst: torch.Tensor,  # (E,) — destination indices
+        rbf: torch.Tensor,  # (E, n_rbf)
     ) -> torch.Tensor:
-        """Returns (E, 1, 1) attention weights for each edge."""
-        q = self.q_proj(h_i)  # (E, C)
-        k = self.k_proj(h_j)  # (E, C)
-        rbf_w = self.rbf_proj(rbf if rbf is not None else self.rbf(dist))  # (E, C)
-
-        # Multi-head dot-product attention
-        E, C = q.shape
-        q = q.view(E, self.n_heads, self.head_dim)
-        k = k.view(E, self.n_heads, self.head_dim)
-        rbf_w = rbf_w.view(E, self.n_heads, self.head_dim)
+        """Returns (E, n_heads) attention weights, one per channel group."""
+        E = h_i.shape[0]
+        q = self.q_proj(h_i).view(E, self.n_heads, self.head_dim)
+        k = self.k_proj(h_j).view(E, self.n_heads, self.head_dim)
+        rbf_w = self.rbf_proj(rbf).view(E, self.n_heads, self.head_dim)
 
         attn_logits = (q * k * rbf_w).sum(-1) * self.scale  # (E, n_heads)
-
-        # Softmax over neighbors of each receiver
-        attn = scatter_softmax(attn_logits, dst, dim=0)  # (E, n_heads)
-        attn = attn.mean(dim=-1)  # (E,) average over heads
-
-        return attn.unsqueeze(-1).unsqueeze(-1)  # (E, 1, 1) for broadcasting
+        return scatter_softmax(attn_logits, dst, dim=0)
 
 
 # ============================================================
@@ -215,18 +193,21 @@ class CliffordMessageFunction(nn.Module):
         self,
         n_channels: int,
         n_rbf: int,
-        edge_grades: Tuple[int, ...],
-        node_input_grades: Tuple[int, ...],
-        gp_output_grades: Tuple[int, ...],
+        edge_grades: tuple[int, ...],
+        node_input_grades: tuple[int, ...],
+        gp_output_grades: tuple[int, ...],
         use_attention: bool = True,
         n_heads: int = 4,
+        cutoff: float = 5.0,
     ):
         super().__init__()
         self.alg = CliffordAlgebra()
+        self.cutoff_fn = CosineCutoff(cutoff)
         self.n_channels = n_channels
         self.node_input_grades = node_input_grades
         self.edge_grades = edge_grades
         self.use_attention = use_attention
+        self.n_heads = n_heads
 
         self.pre_edge = CliffordIPLinear(
             n_channels, n_channels, bias=False, active_grades=edge_grades
@@ -244,8 +225,6 @@ class CliffordMessageFunction(nn.Module):
         if use_attention:
             self.attention = CliffordAttention(n_channels, n_heads, n_rbf)
         else:
-            # Fallback: radial gating
-            self.rbf = RadialBasisFunctions(n_rbf)
             self.radial_gate = nn.Sequential(
                 nn.Linear(n_rbf, n_channels),
                 nn.SiLU(),
@@ -261,7 +240,7 @@ class CliffordMessageFunction(nn.Module):
         dist: torch.Tensor,
         dst: torch.Tensor,
         n_nodes: int,
-        rbf: Optional[torch.Tensor] = None,
+        rbf: torch.Tensor | None = None,
     ) -> torch.Tensor:
         e = self.pre_edge(edge_mv)
 
@@ -275,16 +254,16 @@ class CliffordMessageFunction(nn.Module):
 
         # Attention or radial gating
         if self.use_attention:
-            attn = self.attention(
-                h_i[..., 0], h_j[..., 0], dist, dst, n_nodes, rbf=rbf
-            )
-            msg = msg * attn
+            attn = self.attention(h_i[..., 0], h_j[..., 0], dst, rbf)
+            e, c, d = msg.shape
+            msg = (
+                msg.view(e, self.n_heads, c // self.n_heads, d) * attn.view(e, self.n_heads, 1, 1)
+            ).view(e, c, d)
         else:
-            rbf_val = rbf if rbf is not None else self.rbf(dist)
-            gate = self.radial_gate(rbf_val).unsqueeze(-1)
+            gate = self.radial_gate(rbf).unsqueeze(-1)
             msg = msg * gate
 
-        return msg
+        return msg * self.cutoff_fn(dist).view(-1, 1, 1)
 
 
 # ============================================================
@@ -300,7 +279,7 @@ class CliffordSelfInteraction(nn.Module):
     Provides grade mixing that CliffordIPLinear cannot do alone.
     """
 
-    def __init__(self, n_channels: int, active_grades: Tuple[int, ...] = ALL_GRADES):
+    def __init__(self, n_channels: int, active_grades: tuple[int, ...] = ALL_GRADES):
         super().__init__()
         self.alg = CliffordAlgebra()
         self.proj = CliffordIPLinear(
@@ -330,7 +309,7 @@ class CliffordMultiBodyInteraction(nn.Module):
     def __init__(
         self,
         n_channels: int,
-        active_grades: Tuple[int, ...] = ALL_GRADES,
+        active_grades: tuple[int, ...] = ALL_GRADES,
         max_body_order: int = 3,
     ):
         super().__init__()
@@ -338,12 +317,8 @@ class CliffordMultiBodyInteraction(nn.Module):
         self.max_body_order = max_body_order
         self.active_grades = active_grades
 
-        self.w2 = CliffordIPLinear(
-            n_channels, n_channels, bias=False, active_grades=active_grades
-        )
-        self.w3 = CliffordIPLinear(
-            n_channels, n_channels, bias=False, active_grades=active_grades
-        )
+        self.w2 = CliffordIPLinear(n_channels, n_channels, bias=False, active_grades=active_grades)
+        self.w3 = CliffordIPLinear(n_channels, n_channels, bias=False, active_grades=active_grades)
         if max_body_order >= 4:
             self.w4 = CliffordIPLinear(
                 n_channels, n_channels, bias=False, active_grades=active_grades
@@ -379,9 +354,10 @@ class CliffordUpdateFunction(nn.Module):
     def __init__(
         self,
         n_channels: int,
-        input_grades: Tuple[int, ...],
-        output_grades: Tuple[int, ...],
+        input_grades: tuple[int, ...],
+        output_grades: tuple[int, ...],
         use_self_interaction: bool = True,
+        node_grades: tuple[int, ...] | None = None,
     ):
         super().__init__()
         self.use_self_interaction = use_self_interaction
@@ -390,9 +366,7 @@ class CliffordUpdateFunction(nn.Module):
         self.linear_in = CliffordIPLinear(
             cat_mult * n_channels, n_channels, bias=True, active_grades=output_grades
         )
-        self.activation = CliffordIPGateActivation(
-            n_channels, active_grades=output_grades
-        )
+        self.activation = CliffordIPGateActivation(n_channels, active_grades=output_grades)
         self.linear_out = CliffordIPLinear(
             n_channels, n_channels, bias=True, active_grades=output_grades
         )
@@ -400,7 +374,7 @@ class CliffordUpdateFunction(nn.Module):
 
         if use_self_interaction:
             self.self_int = CliffordSelfInteraction(
-                n_channels, active_grades=output_grades
+                n_channels, active_grades=node_grades or input_grades
             )
 
     def forward(self, h: torch.Tensor, agg: torch.Tensor) -> torch.Tensor:
@@ -440,13 +414,14 @@ class CliffordInteractionBlock(nn.Module):
         self,
         n_channels: int,
         n_rbf: int,
-        edge_grades: Tuple[int, ...],
-        node_input_grades: Tuple[int, ...],
-        node_output_grades: Tuple[int, ...],
+        edge_grades: tuple[int, ...],
+        node_input_grades: tuple[int, ...],
+        node_output_grades: tuple[int, ...],
         use_attention: bool = True,
         use_self_interaction: bool = True,
         max_body_order: int = 3,
         n_heads: int = 4,
+        cutoff: float = 5.0,
     ):
         super().__init__()
         self.n_channels = n_channels
@@ -461,6 +436,7 @@ class CliffordInteractionBlock(nn.Module):
             gp_output_grades=gp_out,
             use_attention=use_attention,
             n_heads=n_heads,
+            cutoff=cutoff,
         )
 
         union_grades = tuple(sorted(set(node_input_grades) | set(gp_out)))
@@ -477,6 +453,7 @@ class CliffordInteractionBlock(nn.Module):
             input_grades=union_grades,
             output_grades=node_output_grades,
             use_self_interaction=use_self_interaction,
+            node_grades=node_input_grades,
         )
 
     def forward(
@@ -485,7 +462,7 @@ class CliffordInteractionBlock(nn.Module):
         edge_index: torch.Tensor,
         edge_mv: torch.Tensor,
         dist: torch.Tensor,
-        rbf: Optional[torch.Tensor] = None,
+        rbf: torch.Tensor | None = None,
     ) -> torch.Tensor:
         src, dst = edge_index
         h_j = h[src]
@@ -522,9 +499,10 @@ class CliffordOutputBlock(nn.Module):
         self.use_gp_readout = use_gp_readout
         self.alg = CliffordAlgebra()
 
-        self.pre_mix = CliffordIPLinear(
-            n_channels, n_channels, bias=False, active_grades=ALL_GRADES
-        )
+        if use_gp_readout:
+            self.pre_mix = CliffordIPLinear(
+                n_channels, n_channels, bias=False, active_grades=ALL_GRADES
+            )
 
         head_in = 2 * n_channels if use_gp_readout else n_channels
 
@@ -541,7 +519,7 @@ class CliffordOutputBlock(nn.Module):
     def forward(
         self,
         h: torch.Tensor,
-        batch: Optional[torch.Tensor] = None,
+        batch: torch.Tensor | None = None,
     ):
         if self.use_gp_readout:
             # GP readout mixing
@@ -586,7 +564,7 @@ class PerLayerEnergyReadout(nn.Module):
             nn.Linear(n_hidden, 1),
         )
 
-    def forward(self, h: torch.Tensor, batch: Optional[torch.Tensor] = None):
+    def forward(self, h: torch.Tensor, batch: torch.Tensor | None = None):
         atom_e = self.head(h[..., 0]).squeeze(-1)  # grade-0 → energy
         if batch is not None:
             n_mol = batch.max().item() + 1
@@ -604,7 +582,7 @@ class CliffordNet(nn.Module):
 
     Architecture:
         1. Atom embed → (N, C, 8) scalar-only multivectors
-        2. Edge embed → (E, C, 8) grades (0, 1) + L=2 invariant features
+        2. Edge embed → (E, C, 8) grades (0, 1)
         3. N interaction blocks with progressive grade activation,
            grade-sparse GP dispatch, equivariant attention,
            self-interaction, multi-body (MACE-style), per-layer readout
@@ -619,12 +597,9 @@ class CliffordNet(nn.Module):
         n_rbf: int = 20,
         cutoff: float = 5.0,
         n_hidden_output: int = 64,
-        max_neighbors: int = 50,
-        direct_forces: bool = True,
         use_attention: bool = True,
         use_self_interaction: bool = True,
         max_body_order: int = 3,
-        use_l2: bool = True,
         use_multiscale: bool = True,
         use_gp_readout: bool = True,
         n_heads: int = 4,
@@ -634,16 +609,13 @@ class CliffordNet(nn.Module):
     ):
         super().__init__()
         self.cutoff = cutoff
-        self.direct_forces = direct_forces
         self.n_channels = n_channels
         self.use_multiscale = use_multiscale
         self.use_dens = use_dens
         self.dens_noise_std = dens_noise_std
 
         self.atom_embed = CliffordAtomEmbedding(n_atom_types, n_channels)
-        self.edge_embed = CliffordEdgeEmbedding(
-            n_rbf, n_channels, cutoff, use_l2=use_l2
-        )
+        self.edge_embed = CliffordEdgeEmbedding(n_rbf, n_channels, cutoff)
 
         # Grade schedule
         edge_grades = (0, 1)
@@ -651,7 +623,7 @@ class CliffordNet(nn.Module):
 
         # Interaction blocks
         self.interactions = nn.ModuleList()
-        node_grades: Tuple[int, ...] = (0,)
+        node_grades: tuple[int, ...] = (0,)
         for i in range(n_interactions):
             out_grades = layer_output_grades[i]
             self.interactions.append(
@@ -665,18 +637,20 @@ class CliffordNet(nn.Module):
                     use_self_interaction=use_self_interaction,
                     max_body_order=max_body_order,
                     n_heads=n_heads,
+                    cutoff=cutoff,
                 )
             )
             node_grades = out_grades
 
         # Multi-scale per-layer readout
         if use_multiscale:
-            self.layer_readouts = nn.ModuleList([
-                PerLayerEnergyReadout(n_channels, n_hidden_output)
-                for _ in range(n_interactions)
-            ])
+            self.layer_readouts = nn.ModuleList(
+                [PerLayerEnergyReadout(n_channels, n_hidden_output) for _ in range(n_interactions)]
+            )
 
-        self.output = CliffordOutputBlock(n_channels, n_hidden_output, use_gp_readout=use_gp_readout)
+        self.output = CliffordOutputBlock(
+            n_channels, n_hidden_output, use_gp_readout=use_gp_readout
+        )
 
         self._grade_schedule = layer_output_grades
 
@@ -685,14 +659,11 @@ class CliffordNet(nn.Module):
         atomic_numbers: torch.Tensor,
         pos: torch.Tensor,
         edge_index: torch.Tensor,
-        batch: Optional[torch.Tensor] = None,
+        batch: torch.Tensor | None = None,
     ):
-        if not self.direct_forces:
-            pos = pos.clone().requires_grad_(True)
-
         src, dst = edge_index
         rel_pos = pos[dst] - pos[src]
-        dist = torch.sqrt(torch.sum(rel_pos ** 2, dim=-1) + 1e-8)
+        dist = torch.sqrt(torch.sum(rel_pos**2, dim=-1) + 1e-8)
         direction = rel_pos / (dist.unsqueeze(-1) + 1e-8)
 
         h = self.atom_embed(atomic_numbers)
@@ -711,14 +682,6 @@ class CliffordNet(nn.Module):
         if multiscale_energy is not None:
             energy = energy + multiscale_energy
 
-        if not self.direct_forces:
-            forces = -torch.autograd.grad(
-                energy.sum(),
-                pos,
-                create_graph=self.training,
-                retain_graph=self.training,
-            )[0]
-
         return energy, forces
 
     def forward_with_dens(
@@ -726,7 +689,7 @@ class CliffordNet(nn.Module):
         atomic_numbers: torch.Tensor,
         pos: torch.Tensor,
         edge_index: torch.Tensor,
-        batch: Optional[torch.Tensor] = None,
+        batch: torch.Tensor | None = None,
     ):
         """Forward with DeNS denoising auxiliary objective.
 
@@ -743,7 +706,7 @@ class CliffordNet(nn.Module):
 
             # Recompute edges for noisy positions
             rel_pos_n = pos_noisy[edge_index[1]] - pos_noisy[edge_index[0]]
-            dist_n = torch.sqrt(torch.sum(rel_pos_n ** 2, dim=-1) + 1e-8)
+            dist_n = torch.sqrt(torch.sum(rel_pos_n**2, dim=-1) + 1e-8)
             direction_n = rel_pos_n / (dist_n.unsqueeze(-1) + 1e-8)
 
             h_n = self.atom_embed(atomic_numbers)
@@ -771,167 +734,5 @@ class CliffordNet(nn.Module):
             print(f"  Layer {i}: {g}")
 
 
-# Public alias — CliffordNet is the implementation, CliffordIP is the exported name
-CliffordIP = CliffordNet
-
-
 # ============================================================
 # Smoke Test
-# ============================================================
-
-
-def smoke_test():
-    import time
-
-    print("=" * 60)
-    print("CliffordIP Smoke Test")
-    print("=" * 60)
-
-    device = "cpu"
-    torch.manual_seed(42)
-
-    N, C = 10, 64
-    n_interactions = 5
-
-    atomic_numbers = torch.randint(1, 50, (N,), device=device)
-    pos = torch.randn(N, 3, device=device) * 2.0
-    batch = torch.zeros(N, dtype=torch.long, device=device)
-
-    cutoff = 5.0
-    src, dst = [], []
-    for i in range(N):
-        for j in range(N):
-            if i != j and (pos[i] - pos[j]).norm() < cutoff:
-                src.append(i)
-                dst.append(j)
-    edge_index = torch.tensor([src, dst], dtype=torch.long, device=device)
-
-    print(f"\nAtoms: {N}, Edges: {edge_index.shape[1]}, Channels: {C}")
-
-    model = CliffordNet(
-        n_channels=C,
-        n_interactions=n_interactions,
-        cutoff=cutoff,
-        direct_forces=True,
-        use_attention=True,
-        use_self_interaction=True,
-        max_body_order=3,
-        use_l2=True,
-        use_multiscale=True,
-        use_dens=True,
-    ).to(device)
-
-    print(f"Parameters: {model.num_params:,}")
-    model.print_grade_schedule()
-
-    # Forward
-    t0 = time.time()
-    energy, forces = model(atomic_numbers, pos, edge_index, batch)
-    t1 = time.time()
-
-    print(f"\nForward pass: {(t1 - t0) * 1000:.1f} ms")
-    print(f"Energy: {energy.item():.6f}")
-    print(f"Forces shape: {forces.shape}, norm: {forces.norm():.6f}")
-
-    # Forward with DeNS
-    model.train()
-    energy, forces, dens_loss = model.forward_with_dens(
-        atomic_numbers, pos, edge_index, batch
-    )
-    print(f"DeNS loss: {dens_loss.item():.6f}")
-
-    # Equivariance
-    print("\n--- Equivariance Test ---")
-    model.eval()
-    Q, _ = torch.linalg.qr(torch.randn(3, 3))
-    if torch.det(Q) < 0:
-        Q[:, 0] *= -1
-
-    with torch.no_grad():
-        e1, f1 = model(atomic_numbers, pos, edge_index, batch)
-        pos_rot = pos @ Q.T
-        sr, dr = [], []
-        for i in range(N):
-            for j in range(N):
-                if i != j and (pos_rot[i] - pos_rot[j]).norm() < cutoff:
-                    sr.append(i)
-                    dr.append(j)
-        ei_rot = torch.tensor([sr, dr], dtype=torch.long, device=device)
-        e2, f2 = model(atomic_numbers, pos_rot, ei_rot, batch)
-
-    e_err = (e1 - e2).abs().item()
-    f_err = (f2 - f1 @ Q.T).abs().max().item()
-    e_pass = e_err < 1e-3  # slightly looser for attention
-    f_pass = f_err < 1e-3
-    print(f"Energy invariance error: {e_err:.2e}  {'✓' if e_pass else '✗'}")
-    print(f"Force equivariance error: {f_err:.2e}  {'✓' if f_pass else '✗'}")
-
-    # Translation invariance
-    print("\n--- Translation Invariance Test ---")
-    with torch.no_grad():
-        t = torch.randn(3, device=device) * 3.0
-        pos_trans = pos + t  # uniform shift — distances unchanged, reuse edge_index
-        e3, f3 = model(atomic_numbers, pos_trans, edge_index, batch)
-    t_e_err = (e1 - e3).abs().item()
-    t_f_err = (f3 - f1).abs().max().item()
-    t_e_pass = t_e_err < 1e-4
-    t_f_pass = t_f_err < 1e-4
-    print(f"Energy translation invariance error: {t_e_err:.2e}  {'✓' if t_e_pass else '✗'}")
-    print(f"Force translation invariance error:  {t_f_err:.2e}  {'✓' if t_f_pass else '✗'}")
-
-    # O(3) reflection invariance (improper rotation, det = -1)
-    print("\n--- O(3) Reflection Test ---")
-    Q_imp, _ = torch.linalg.qr(torch.randn(3, 3))
-    if torch.det(Q_imp) > 0:
-        Q_imp[:, 0] *= -1  # force det = -1
-    with torch.no_grad():
-        pos_ref = pos @ Q_imp.T
-        sr2, dr2 = [], []
-        for i in range(N):
-            for j in range(N):
-                if i != j and (pos_ref[i] - pos_ref[j]).norm() < cutoff:
-                    sr2.append(i)
-                    dr2.append(j)
-        ei_ref = torch.tensor([sr2, dr2], dtype=torch.long, device=device)
-        e4, f4 = model(atomic_numbers, pos_ref, ei_ref, batch)
-    r_e_err = (e1 - e4).abs().item()
-    r_f_err = (f4 - f1 @ Q_imp.T).abs().max().item()
-    r_e_pass = r_e_err < 1e-3
-    r_f_pass = r_f_err < 1e-3
-    print(f"Energy O(3) invariance error: {r_e_err:.2e}  {'✓' if r_e_pass else '✗'}")
-    print(f"Force O(3) equivariance error: {r_f_err:.2e}  {'✓' if r_f_pass else '✗'}")
-
-    # Gradients
-    print("\n--- Gradient Test ---")
-    model.train()
-    model.zero_grad()
-    energy, forces = model(atomic_numbers, pos, edge_index, batch)
-    loss = energy.sum() + forces.norm()
-    loss.backward()
-
-    total, active, dead = 0, 0, []
-    for name, p in model.named_parameters():
-        if p.requires_grad:
-            total += 1
-            if p.grad is not None and p.grad.abs().sum() > 0:
-                active += 1
-            else:
-                dead.append(name)
-
-    grad_pass = active == total
-    print(f"Parameters with gradients: {active}/{total}")
-    if dead:
-        print("Missing gradients:")
-        for n in dead[:15]:
-            print(f"  - {n}")
-    print(f"All gradients present: {'✓' if grad_pass else '✗'}")
-
-    print("\n" + "=" * 60)
-    all_pass = e_pass and f_pass and t_e_pass and t_f_pass and grad_pass
-    print(f"{'ALL TESTS PASSED ✓' if all_pass else 'SOME TESTS FAILED ✗'}")
-    print("=" * 60)
-    return all_pass
-
-
-if __name__ == "__main__":
-    smoke_test()

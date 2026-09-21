@@ -1,9 +1,8 @@
 # OC20 S2EF dataset config — FairChem-aligned losses and evaluation
 dataset:
-  name: oc20
+  name: oc20_s2ef
   data_root: data/OC20
   task_type: s2ef
-  target_name: s2ef
   task: s2ef
   split_train: train
   split_val: val_id
